@@ -61,4 +61,5 @@ setup(
     scripts=[],
     url='https://github.com/okomestudio/s3concat',
     install_requires=[
-        'boto3'])
+        'boto3',
+        'gevent'])
