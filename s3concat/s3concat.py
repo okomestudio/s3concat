@@ -26,7 +26,11 @@ from __future__ import absolute_import
 import logging
 
 import boto3
+import gevent
+import gevent.pool
 from botocore.exceptions import ClientError
+
+from .resources import S3URL
 
 
 logging.basicConfig(level='WARNING')
@@ -126,7 +130,7 @@ def _concat_to_big_object(bucket, key, content):
         raise
 
 
-def s3concat(bucket, key, content):
+def s3concat_content(bucket, key, content):
     info = _get_object_info(bucket, key)
     if info is None:
         _upload_object(bucket, key, content)
@@ -135,3 +139,111 @@ def s3concat(bucket, key, content):
             _concat_to_small_object(bucket, key, content)
         else:
             _concat_to_big_object(bucket, key, content)
+
+
+def s3concat(*args, **kwargs):
+    remove_orig = kwargs.get('remove_orig', False)
+
+    if len(args) < 2:
+        raise ValueError('Must specify at least two S3 objects')
+    primary = S3URL(args[0])
+    resp = _get_object_info(primary.bucket, primary.key)
+    if resp is None:
+        # primary object does not exit yet
+        urls = args[1:]
+    else:
+        # overwrite primary object
+        urls = args
+
+    objs = {}
+
+    def get_info(idx, url):
+        obj = S3URL(url)
+        resp = _get_object_info(obj.bucket, obj.key)
+        if resp is None:
+            log.warning('Skipping non-existing S3 object %s', obj)
+            return
+        objs[idx] = (obj, resp)
+
+    pool = gevent.pool.Pool()
+    for idx, url in enumerate(urls):
+        pool.spawn(get_info, idx, url)
+    pool.join()
+
+    objs = [objs[i] for i in xrange(len(objs))]
+
+    parts = []
+    current_part = []
+    current_part_size = 0
+    for obj, info in objs:
+        size = info['ContentLength']
+
+        if current_part_size + size < 5 * MB:
+            current_part.append((obj, None))
+            current_part_size += size
+            continue
+
+        diff_size = 5 * MB - current_part_size
+        current_part.append((obj, (0, diff_size - 1)))
+
+        parts.append(current_part)
+
+        if size - diff_size < 5 * MB:
+            current_part = [(obj, (diff_size, size - 1))]
+            current_part_size = size - diff_size
+            continue
+
+        parts.append([(obj, (diff_size, size - 1))])
+
+        current_part = []
+        current_part_size = 0
+
+    if current_part:
+        parts.append(current_part)
+
+    resp = s3.create_multipart_upload(Bucket=primary.bucket, Key=primary.key)
+    upload_id = resp['UploadId']
+    try:
+        upload_parts = []
+        for part_number, part in enumerate(parts, 1):
+            if len(part) == 1:
+                obj, byte_range = part[0]
+                resp = s3.upload_part_copy(
+                    CopySource={'Bucket': obj.bucket, 'Key': obj.key},
+                    CopySourceRange='{0}-{1}'.format(*byte_range),
+                    Bucket=primary.bucket,
+                    Key=primary.key,
+                    PartNumber=part_number,
+                    UploadId=upload_id)
+                upload_parts.append(resp['CopyPartResult']['ETag'][1:-1])
+            else:
+                content = ''
+                for obj, byte_range in part:
+                    kwargs = {'Bucket': obj.bucket,
+                              'Key': obj.key}
+                    if byte_range is not None:
+                        kwargs['Range'] = '{0}-{1}'.format(*byte_range)
+                    resp = s3.get_object(**kwargs)
+                    content += resp['Body'].read()
+                resp = s3.upload_part(
+                    Body=content,
+                    Bucket=primary.bucket,
+                    Key=primary.key,
+                    PartNumber=part_number,
+                    UploadId=upload_id)
+                upload_parts.append(resp['ETag'][1:-1])
+
+        resp = s3.complete_multipart_upload(
+            Bucket=primary.bucket,
+            Key=primary.key,
+            MultipartUpload={'Parts': [
+                {'ETag': etag, 'PartNumber': i}
+                for i, etag in enumerate(upload_parts, 1)]},
+            UploadId=upload_id)
+    except Exception:
+        log.exception('Error completing multipart upload')
+        s3.abort_multipart_upload(
+            Bucket=primary.bucket, Key=primary.key, UploadId=upload_id)
+        raise
+
+    log.warning('S3CONCAT FINIESHED %r', (primary))

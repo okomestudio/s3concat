@@ -6,6 +6,7 @@ import boto3
 import pytest
 
 from s3concat import s3concat
+from s3concat import s3concat_content
 
 
 KB = 1024
@@ -64,13 +65,13 @@ def test_generate_file(size):
     (KB, 5 * MB + KB),
     (5 * MB + KB, KB),
     (5 * MB + KB, 5 * MB + KB)])
-def test_concat(s3, bucket, size_source, size_diff):
+def test_s3concat_content(s3, bucket, size_source, size_diff):
     key = 'newobj'
     content = generate_file(size_source)
     h = md5(content)
 
     # concat to a non-existing key creates a new object
-    s3concat(bucket, key, content)
+    s3concat_content(bucket, key, content)
     resp = s3.get_object(Bucket=bucket, Key=key)
     downloaded = resp['Body'].read()
     assert h == md5(downloaded)
@@ -78,7 +79,26 @@ def test_concat(s3, bucket, size_source, size_diff):
     # concat to an existing key adds to the object
     diff = generate_file(size_diff)
     h = md5(content + diff)
-    s3concat(bucket, key, diff)
+    s3concat_content(bucket, key, diff)
     resp = s3.get_object(Bucket=bucket, Key=key)
+    downloaded = resp['Body'].read()
+    assert h == md5(downloaded)
+
+
+def test_s3concat(s3, bucket):
+    objs = {}
+    for i in xrange(3):
+        key = 'obj{}'.format(i + 1)
+        content = generate_file(234)
+        objs[key] = content
+        s3.put_object(Bucket=bucket, Key=key, Body=content)
+
+    h = md5(objs['obj1'] + objs['obj2'])
+
+    s3concat('s3://{}/cat'.format(bucket),
+             's3://{}/obj1'.format(bucket),
+             's3://{}/obj2'.format(bucket))
+
+    resp = s3.get_object(Bucket=bucket, Key='cat')
     downloaded = resp['Body'].read()
     assert h == md5(downloaded)

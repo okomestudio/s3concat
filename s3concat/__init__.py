@@ -25,6 +25,7 @@
 from __future__ import absolute_import
 
 from .s3concat import s3concat  # noqa
+from .s3concat import s3concat_content  # noqa
 
 
 __version__ = '0.1.0.dev'
