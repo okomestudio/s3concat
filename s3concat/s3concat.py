@@ -37,9 +37,26 @@ s3 = boto3.client('s3')
 MB = 1024 ** 2
 
 
-def _do_multipart_upload(obj, body):
-    bucket = obj.bucket
-    key = obj.key + '.tmp'
+def _get_object_info(bucket, key):
+    try:
+        return s3.head_object(Bucket=bucket, Key=key)
+    except ClientError:
+        return None
+
+
+def _upload_object(bucket, key, content):
+    s3.put_object(Bucket=bucket, Key=key, Body=content)
+
+
+def _concat_to_small_object(bucket, key, content):
+    resp = s3.get_object(Bucket=bucket, Key=key)
+    downloaded = resp['Body'].read()
+    s3.put_object(Bucket=bucket, Key=key, Body=downloaded + content)
+
+
+def _do_multipart_upload(bucket, key, content):
+    origkey = key
+    key = key + '.tmp'
 
     resp = s3.create_multipart_upload(Bucket=bucket, Key=key)
     upload_id = resp['UploadId']
@@ -48,7 +65,7 @@ def _do_multipart_upload(obj, body):
         parts = []
 
         resp = s3.upload_part_copy(
-            CopySource={'Bucket': obj.bucket, 'Key': obj.key},
+            CopySource={'Bucket': bucket, 'Key': origkey},
             Bucket=bucket,
             Key=key,
             PartNumber=1,
@@ -57,7 +74,7 @@ def _do_multipart_upload(obj, body):
         log.warning('PARTS %r', parts)
 
         resp = s3.upload_part(
-            Body=body,
+            Body=content,
             Bucket=bucket,
             Key=key,
             PartNumber=2,
@@ -80,27 +97,20 @@ def _do_multipart_upload(obj, body):
             UploadId=upload_id)
         raise
 
+    else:
+        s3.delete_object(Bucket=bucket, Key=origkey)
+        s3.copy_object(
+            CopySource={'Bucket': bucket, 'Key': key},
+            Bucket=bucket,
+            Key=origkey)
 
-class S3Object(object):
 
-    def __init__(self, bucket, key):
-        self.bucket = bucket
-        self.key = key
-
-        try:
-            resp = s3.head_object(
-                Bucket=self.bucket,
-                Key=self.key)
-        except ClientError:
-            raise ValueError('Object does not exist')
-        self.size = resp['ContentLength']
-
-    @property
-    def url(self):
-        return 's3://{}/{}'.format(self.bucket, self.key)
-
-    def concat_string(self, body):
-        if self.size > 5 * MB:
-            _do_multipart_upload(self, body)
+def s3concat(bucket, key, content):
+    info = _get_object_info(bucket, key)
+    if info is None:
+        _upload_object(bucket, key, content)
+    else:
+        if info['ContentLength'] < 5 * MB:
+            _concat_to_small_object(bucket, key, content)
         else:
-            pass
+            _do_multipart_upload(bucket, key, content)

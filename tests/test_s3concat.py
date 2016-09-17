@@ -5,10 +5,8 @@ import string
 import boto3
 import faker
 import pytest
-try:
-    import ujson as json
-except ImportError:
-    import json
+
+from s3concat import s3concat
 
 
 fake = faker.Factory.create()
@@ -20,17 +18,10 @@ def random_chars(n=12):
         for _ in xrange(n))
 
 
-def generate_file(size, overshoot=True):
-    content = ''
-    while 1:
-        s = json.dumps({'first_name': fake.name(),
-                        'address': fake.address()}) + '\n'
-        if len(content) + len(s) > size:
-            if overshoot:
-                content += s
-            break
-        content += s
-    return content
+def generate_file(size):
+    chars = string.ascii_letters + string.digits + '+/'
+    return ''.join((random.choice(chars) if (i + 1) % 80 else '\n')
+                   for i in xrange(size - 1)) + '\n'
 
 
 def md5(content):
@@ -59,28 +50,44 @@ def bucket(request, s3):
     s3.delete_bucket(Bucket=bucket_name)
 
 
-def test_generate_file_overshoot():
-    size = 1024**2
-    content = generate_file(size, True)
-    assert size < len(content)
+@pytest.mark.parametrize('size', [
+    100,
+    1024,
+    1024**2 + 3])
+def test_generate_file(size):
+    content = generate_file(size)
+    assert size == len(content)
 
 
-def test_generate_file_no_overshoot():
-    size = 1024**2
-    content = generate_file(size, False)
-    assert size >= len(content)
-
-
-def s3concat(bucket, key, content):
-    s3 = boto3.client('s3')
-    s3.put_object(Bucket=bucket, Key=key, Body=content)
-
-
-def test_concat_to_new_object(s3, bucket):
+def test_concat_small(s3, bucket):
     key = 'newobj'
     content = generate_file(1024)
     h = md5(content)
+
+    # concat to a non-existing key creates a new object
     s3concat(bucket, key, content)
     resp = s3.get_object(Bucket=bucket, Key=key)
     downloaded = resp['Body'].read()
     assert h == md5(downloaded)
+    print h, len(downloaded)
+
+    # concat to an existing key adds to the object
+    diff = generate_file(1024)
+    h = md5(content + diff)
+    s3concat(bucket, key, diff)
+    resp = s3.get_object(Bucket=bucket, Key=key)
+    downloaded = resp['Body'].read()
+    assert h == md5(downloaded)
+    print h, len(downloaded)
+
+
+def test_concat_to_big_existing_object(s3, bucket):
+    key = 'bigobj'
+    content = generate_file(5 * 1024**2)
+    s3.put_object(Bucket=bucket, Key=key, Body=content)
+
+    diff = generate_file(1024)
+    h = md5(content + diff)
+    s3concat(bucket, key, diff)
+    resp = s3.get_object(Bucket=bucket, Key=key)
+    assert h == md5(resp['Body'].read())
