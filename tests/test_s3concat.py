@@ -3,13 +3,13 @@ import random
 import string
 
 import boto3
-import faker
 import pytest
 
 from s3concat import s3concat
 
 
-fake = faker.Factory.create()
+KB = 1024
+MB = KB**2
 
 
 def random_chars(n=12):
@@ -59,9 +59,14 @@ def test_generate_file(size):
     assert size == len(content)
 
 
-def test_concat_small(s3, bucket):
+@pytest.mark.parametrize('size_source, size_diff', [
+    (KB, KB),
+    (KB, 5 * MB + KB),
+    (5 * MB + KB, KB),
+    (5 * MB + KB, 5 * MB + KB)])
+def test_concat(s3, bucket, size_source, size_diff):
     key = 'newobj'
-    content = generate_file(1024)
+    content = generate_file(size_source)
     h = md5(content)
 
     # concat to a non-existing key creates a new object
@@ -69,25 +74,11 @@ def test_concat_small(s3, bucket):
     resp = s3.get_object(Bucket=bucket, Key=key)
     downloaded = resp['Body'].read()
     assert h == md5(downloaded)
-    print h, len(downloaded)
 
     # concat to an existing key adds to the object
-    diff = generate_file(1024)
+    diff = generate_file(size_diff)
     h = md5(content + diff)
     s3concat(bucket, key, diff)
     resp = s3.get_object(Bucket=bucket, Key=key)
     downloaded = resp['Body'].read()
     assert h == md5(downloaded)
-    print h, len(downloaded)
-
-
-def test_concat_to_big_existing_object(s3, bucket):
-    key = 'bigobj'
-    content = generate_file(5 * 1024**2)
-    s3.put_object(Bucket=bucket, Key=key, Body=content)
-
-    diff = generate_file(1024)
-    h = md5(content + diff)
-    s3concat(bucket, key, diff)
-    resp = s3.get_object(Bucket=bucket, Key=key)
-    assert h == md5(resp['Body'].read())

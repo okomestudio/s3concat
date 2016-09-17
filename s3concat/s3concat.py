@@ -34,7 +34,8 @@ log = logging.getLogger(__name__)
 
 
 s3 = boto3.client('s3')
-MB = 1024 ** 2
+KB = 1024
+MB = KB**2
 
 
 def _get_object_info(bucket, key):
@@ -44,20 +45,53 @@ def _get_object_info(bucket, key):
         return None
 
 
+def split(content, size):
+    for i in xrange(0, len(content), size):
+        yield content[i:i + size]
+
+
+def _make_upload_parts(content, bucket, key, upload_id, start_from=1,
+                       size=5 * MB):
+    parts = []
+    for part_number, part in enumerate(split(content, size), start_from):
+        resp = s3.upload_part(
+            Body=part,
+            Bucket=bucket,
+            Key=key,
+            PartNumber=part_number,
+            UploadId=upload_id)
+        parts.append(resp['ETag'][1:-1])
+    return parts
+
+
 def _upload_object(bucket, key, content):
-    s3.put_object(Bucket=bucket, Key=key, Body=content)
+    if len(content) < 5 * MB:
+        s3.put_object(Bucket=bucket, Key=key, Body=content)
+    else:
+        resp = s3.create_multipart_upload(Bucket=bucket, Key=key)
+        upload_id = resp['UploadId']
+        try:
+            parts = _make_upload_parts(content, bucket, key, upload_id)
+            resp = s3.complete_multipart_upload(
+                Bucket=bucket,
+                Key=key,
+                MultipartUpload={'Parts': [
+                    {'ETag': etag, 'PartNumber': i}
+                    for i, etag in enumerate(parts, 1)]},
+                UploadId=upload_id)
+        except Exception:
+            log.exception('Error completing multipart upload')
+            s3.abort_multipart_upload(
+                Bucket=bucket, Key=key, UploadId=upload_id)
+            raise
 
 
 def _concat_to_small_object(bucket, key, content):
     resp = s3.get_object(Bucket=bucket, Key=key)
-    downloaded = resp['Body'].read()
-    s3.put_object(Bucket=bucket, Key=key, Body=downloaded + content)
+    _upload_object(bucket, key, resp['Body'].read() + content)
 
 
-def _do_multipart_upload(bucket, key, content):
-    origkey = key
-    key = key + '.tmp'
-
+def _concat_to_big_object(bucket, key, content):
     resp = s3.create_multipart_upload(Bucket=bucket, Key=key)
     upload_id = resp['UploadId']
 
@@ -65,21 +99,15 @@ def _do_multipart_upload(bucket, key, content):
         parts = []
 
         resp = s3.upload_part_copy(
-            CopySource={'Bucket': bucket, 'Key': origkey},
+            CopySource={'Bucket': bucket, 'Key': key},
             Bucket=bucket,
             Key=key,
             PartNumber=1,
             UploadId=upload_id)
         parts.append(resp['CopyPartResult']['ETag'][1:-1])
-        log.warning('PARTS %r', parts)
 
-        resp = s3.upload_part(
-            Body=content,
-            Bucket=bucket,
-            Key=key,
-            PartNumber=2,
-            UploadId=upload_id)
-        parts.append(resp['ETag'][1:-1])
+        parts.extend(_make_upload_parts(
+            content, bucket, key, upload_id, start_from=2))
 
         resp = s3.complete_multipart_upload(
             Bucket=bucket,
@@ -97,13 +125,6 @@ def _do_multipart_upload(bucket, key, content):
             UploadId=upload_id)
         raise
 
-    else:
-        s3.delete_object(Bucket=bucket, Key=origkey)
-        s3.copy_object(
-            CopySource={'Bucket': bucket, 'Key': key},
-            Bucket=bucket,
-            Key=origkey)
-
 
 def s3concat(bucket, key, content):
     info = _get_object_info(bucket, key)
@@ -113,4 +134,4 @@ def s3concat(bucket, key, content):
         if info['ContentLength'] < 5 * MB:
             _concat_to_small_object(bucket, key, content)
         else:
-            _do_multipart_upload(bucket, key, content)
+            _concat_to_big_object(bucket, key, content)
