@@ -24,6 +24,7 @@
 # SOFTWARE.
 from __future__ import absolute_import
 import logging
+from collections import defaultdict
 
 import boto3
 import gevent
@@ -54,40 +55,60 @@ def split(content, size):
         yield content[i:i + size]
 
 
-def _make_upload_parts(content, bucket, key, upload_id, start_from=1,
-                       size=5 * MB):
-    parts = []
-    for part_number, part in enumerate(split(content, size), start_from):
+class _MultipartUpload(object):
+
+    def __init__(self, bucket, key):
+        self.bucket = bucket
+        self.key = key
+        self.upload_id = None
+        self.upload_parts = []
+
+    def __enter__(self):
+        resp = s3.create_multipart_upload(Bucket=self.bucket, Key=self.key)
+        self.upload_id = resp['UploadId']
+        return self
+
+    def __exit__(self, exc_t, exc_v, exc_tb):
+        if exc_t:
+            log.exception('Error completing multipart upload; aborting')
+            s3.abort_multipart_upload(
+                Bucket=self.bucket, Key=self.key, UploadId=self.upload_id)
+            raise exc_v
+
+    def start(self):
+        s3.complete_multipart_upload(
+            Bucket=self.bucket, Key=self.key, MultipartUpload={'Parts': [
+                {'ETag': etag, 'PartNumber': i}
+                for i, etag in enumerate(self.upload_parts, 1)]},
+            UploadId=self.upload_id)
+
+    def add_part(self, **kwargs):
         resp = s3.upload_part(
-            Body=part,
-            Bucket=bucket,
-            Key=key,
-            PartNumber=part_number,
-            UploadId=upload_id)
-        parts.append(resp['ETag'][1:-1])
-    return parts
+            Bucket=self.bucket,
+            Key=self.key,
+            PartNumber=len(self.upload_parts) + 1,
+            UploadId=self.upload_id,
+            **kwargs)
+        self.upload_parts.append(resp['ETag'][1:-1])
+
+    def add_part_copy(self, **kwargs):
+        resp = s3.upload_part_copy(
+            Bucket=self.bucket,
+            Key=self.key,
+            PartNumber=len(self.upload_parts) + 1,
+            UploadId=self.upload_id,
+            **kwargs)
+        self.upload_parts.append(resp['CopyPartResult']['ETag'][1:-1])
 
 
 def _upload_object(bucket, key, content):
     if len(content) < 5 * MB:
         s3.put_object(Bucket=bucket, Key=key, Body=content)
     else:
-        resp = s3.create_multipart_upload(Bucket=bucket, Key=key)
-        upload_id = resp['UploadId']
-        try:
-            parts = _make_upload_parts(content, bucket, key, upload_id)
-            resp = s3.complete_multipart_upload(
-                Bucket=bucket,
-                Key=key,
-                MultipartUpload={'Parts': [
-                    {'ETag': etag, 'PartNumber': i}
-                    for i, etag in enumerate(parts, 1)]},
-                UploadId=upload_id)
-        except Exception:
-            log.exception('Error completing multipart upload')
-            s3.abort_multipart_upload(
-                Bucket=bucket, Key=key, UploadId=upload_id)
-            raise
+        with _MultipartUpload(bucket, key) as mpu:
+            for part in split(content, size=5 * MB):
+                mpu.add_part(Body=part)
+            mpu.start()
 
 
 def _concat_to_small_object(bucket, key, content):
@@ -96,38 +117,12 @@ def _concat_to_small_object(bucket, key, content):
 
 
 def _concat_to_big_object(bucket, key, content):
-    resp = s3.create_multipart_upload(Bucket=bucket, Key=key)
-    upload_id = resp['UploadId']
-
-    try:
-        parts = []
-
-        resp = s3.upload_part_copy(
-            CopySource={'Bucket': bucket, 'Key': key},
-            Bucket=bucket,
-            Key=key,
-            PartNumber=1,
-            UploadId=upload_id)
-        parts.append(resp['CopyPartResult']['ETag'][1:-1])
-
-        parts.extend(_make_upload_parts(
-            content, bucket, key, upload_id, start_from=2))
-
-        resp = s3.complete_multipart_upload(
-            Bucket=bucket,
-            Key=key,
-            MultipartUpload={'Parts': [
-                {'ETag': etag, 'PartNumber': i}
-                for i, etag in enumerate(parts, 1)]},
-            UploadId=upload_id)
-
-    except Exception:
-        log.exception('Error completing multipart upload')
-        s3.abort_multipart_upload(
-            Bucket=bucket,
-            Key=key,
-            UploadId=upload_id)
-        raise
+    with _MultipartUpload(bucket, key) as mpu:
+        mpu.add_part_copy(
+            CopySource={'Bucket': bucket, 'Key': key})
+        for part in split(content, size=5 * MB):
+            mpu.add_part(Body=part)
+        mpu.start()
 
 
 def s3concat_content(bucket, key, content):
@@ -142,35 +137,30 @@ def s3concat_content(bucket, key, content):
 
 
 def s3concat(*args, **kwargs):
-    remove_orig = kwargs.get('remove_orig', False)
-
     if len(args) < 2:
         raise ValueError('Must specify at least two S3 objects')
-    primary = S3URL(args[0])
-    resp = _get_object_info(primary.bucket, primary.key)
-    if resp is None:
-        # primary object does not exit yet
-        urls = args[1:]
-    else:
-        # overwrite primary object
-        urls = args
 
-    objs = {}
+    remove_orig = kwargs.get('remove_orig', False)
+
+    primary = S3URL(args[0])
+
+    objs = [None] * len(args)
 
     def get_info(idx, url):
         obj = S3URL(url)
         resp = _get_object_info(obj.bucket, obj.key)
         if resp is None:
-            log.warning('Skipping non-existing S3 object %s', obj)
+            if idx != 0:
+                log.warning('Skipping non-existing S3 object %s', obj)
             return
         objs[idx] = (obj, resp)
 
     pool = gevent.pool.Pool()
-    for idx, url in enumerate(urls):
+    for idx, url in enumerate(args):
         pool.spawn(get_info, idx, url)
     pool.join()
 
-    objs = [objs[i] for i in xrange(len(objs))]
+    objs = [o for o in objs if o is not None]
 
     parts = []
     current_part = []
@@ -201,21 +191,13 @@ def s3concat(*args, **kwargs):
     if current_part:
         parts.append(current_part)
 
-    resp = s3.create_multipart_upload(Bucket=primary.bucket, Key=primary.key)
-    upload_id = resp['UploadId']
-    try:
-        upload_parts = []
+    with _MultipartUpload(primary.bucket, primary.key) as mpu:
         for part_number, part in enumerate(parts, 1):
             if len(part) == 1:
                 obj, byte_range = part[0]
-                resp = s3.upload_part_copy(
+                mpu.add_part_copy(
                     CopySource={'Bucket': obj.bucket, 'Key': obj.key},
-                    CopySourceRange='{0}-{1}'.format(*byte_range),
-                    Bucket=primary.bucket,
-                    Key=primary.key,
-                    PartNumber=part_number,
-                    UploadId=upload_id)
-                upload_parts.append(resp['CopyPartResult']['ETag'][1:-1])
+                    CopySourceRange='{0}-{1}'.format(*byte_range))
             else:
                 content = ''
                 for obj, byte_range in part:
@@ -225,25 +207,18 @@ def s3concat(*args, **kwargs):
                         kwargs['Range'] = '{0}-{1}'.format(*byte_range)
                     resp = s3.get_object(**kwargs)
                     content += resp['Body'].read()
-                resp = s3.upload_part(
-                    Body=content,
-                    Bucket=primary.bucket,
-                    Key=primary.key,
-                    PartNumber=part_number,
-                    UploadId=upload_id)
-                upload_parts.append(resp['ETag'][1:-1])
+                mpu.add_part(Body=content)
+        mpu.start()
 
-        resp = s3.complete_multipart_upload(
-            Bucket=primary.bucket,
-            Key=primary.key,
-            MultipartUpload={'Parts': [
-                {'ETag': etag, 'PartNumber': i}
-                for i, etag in enumerate(upload_parts, 1)]},
-            UploadId=upload_id)
-    except Exception:
-        log.exception('Error completing multipart upload')
-        s3.abort_multipart_upload(
-            Bucket=primary.bucket, Key=primary.key, UploadId=upload_id)
-        raise
-
-    log.warning('S3CONCAT FINIESHED %r', (primary))
+    if remove_orig:
+        buckets = defaultdict(set)
+        for obj, _ in objs:
+            if not (obj.bucket == primary.bucket and obj.key == primary.key):
+                buckets[obj.bucket].add(obj.key)
+        for bucket, keys in buckets.iteritems():
+            keys = list(keys)
+            for idx in xrange(0, len(keys), 1000):
+                s3.delete_objects(
+                    Bucket=bucket,
+                    Delete={'Objects': [
+                        {'Key': key} for key in keys[idx:idx + 1000]]})
