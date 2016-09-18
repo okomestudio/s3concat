@@ -162,6 +162,8 @@ def s3concat(*args, **kwargs):
     pool.join()
 
     objs = [o for o in objs if o is not None]
+    if not objs:
+        raise ValueError('None of input S3 objects exist')
 
     parts = []
     current_part = []
@@ -174,20 +176,24 @@ def s3concat(*args, **kwargs):
             current_part_size += size
             continue
 
-        diff_size = 5 * MB - current_part_size
-        current_part.append((obj, (0, diff_size - 1)))
+        if current_part_size == 0:
+            parts.append([(obj, (0, size - 1))])
 
-        parts.append(current_part)
+        else:
+            diff_size = 5 * MB - current_part_size
+            current_part.append((obj, (0, diff_size - 1)))
 
-        if size - diff_size < 5 * MB:
-            current_part = [(obj, (diff_size, size - 1))]
-            current_part_size = size - diff_size
-            continue
+            parts.append(current_part)
 
-        parts.append([(obj, (diff_size, size - 1))])
+            if size - diff_size < 5 * MB:
+                current_part = [(obj, (diff_size, size - 1))]
+                current_part_size = size - diff_size
+                continue
 
-        current_part = []
-        current_part_size = 0
+            parts.append([(obj, (diff_size, size - 1))])
+
+            current_part = []
+            current_part_size = 0
 
     if current_part:
         parts.append(current_part)
@@ -196,16 +202,17 @@ def s3concat(*args, **kwargs):
         for part_number, part in enumerate(parts, 1):
             if len(part) == 1:
                 obj, byte_range = part[0]
-                mpu.add_part_copy(
-                    CopySource={'Bucket': obj.bucket, 'Key': obj.key},
-                    CopySourceRange='{0}-{1}'.format(*byte_range))
+                kwargs = {'CopySource': {'Bucket': obj.bucket, 'Key': obj.key}}
+                if byte_range is not None:
+                    kwargs['CopySourceRange'] = 'bytes={0}-{1}'.format(
+                        *byte_range)
+                mpu.add_part_copy(**kwargs)
             else:
                 content = ''
                 for obj, byte_range in part:
-                    kwargs = {'Bucket': obj.bucket,
-                              'Key': obj.key}
+                    kwargs = {'Bucket': obj.bucket, 'Key': obj.key}
                     if byte_range is not None:
-                        kwargs['Range'] = '{0}-{1}'.format(*byte_range)
+                        kwargs['Range'] = 'bytes={0}-{1}'.format(*byte_range)
                     resp = s3.get_object(**kwargs)
                     content += resp['Body'].read()
                 mpu.add_part(Body=content)

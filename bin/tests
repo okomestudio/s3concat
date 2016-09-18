@@ -29,8 +29,8 @@ set -e
 
 opts=(-v
       --cov=s3concat
-      --cov-report term-missing
-      --log-format="%(asctime)s %(levelname)s %(thread)d %(message)s")
+      --cov-report term-missing)
+#      --log-format="%(asctime)s %(levelname)s %(thread)d %(message)s")
 
 # Tests to run can be specified explicitly or all tests are run:
 if [[ $# -eq 0 ]]; then
