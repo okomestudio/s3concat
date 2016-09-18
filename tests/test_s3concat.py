@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 import hashlib
+import logging
 import random
 import string
 from collections import defaultdict
 
 import pytest
+from moto import mock_s3
 
-from s3concat import resources
-from s3concat import s3concat
-from s3concat import s3concat_content
-from s3concat.s3concat import _get_object_info
+
+log = logging.getLogger(__name__)
 
 
 KB = 1024
@@ -39,7 +39,11 @@ def test_generate_file(size):
 
 @pytest.fixture(scope='session')
 def s3():
-    return resources.s3
+    m = mock_s3()
+    m.start()
+    from s3concat import resources
+    yield resources.s3
+    m.stop()
 
 
 @pytest.fixture(scope='class')
@@ -72,6 +76,7 @@ class TestS3ConcatContent(object):
         (5 * MB + KB, KB),
         (5 * MB + KB, 5 * MB + KB)])
     def test_s3concat_content(self, s3, buckets, size_source, size_diff):
+        from s3concat import s3concat_content
         bucket = buckets[0]
         key = 'newobj'
         content = generate_file(size_source)
@@ -124,6 +129,7 @@ class TestS3Concat(object):
     def to_url(cls, bucket_number, size):
         return 's3://' + cls.buckets[bucket_number] + '/' + str(size)
 
+    @pytest.mark.skip
     @pytest.mark.parametrize('concat_args', [
         ((0, 8*MB+1*KB), (0, 3*MB), (0, 5*MB), (1, 1*KB)),
         ((1, 11*KB), (1, 1*KB), (1, 10*KB)),
@@ -143,6 +149,7 @@ class TestS3Concat(object):
 
         h = md5(content)
 
+        from s3concat import s3concat
         s3concat(*urls)
 
         bucket_number, size = concat_args[0]
@@ -161,16 +168,20 @@ class TestS3Concat(object):
                 's3://{bucket}/1'.format(bucket=bucket),
                 's3://{bucket}/2'.format(bucket=bucket)]
 
+        from s3concat import s3concat
         s3concat(*urls, remove_orig=True)
 
+        from s3concat.s3concat import _get_object_info
         assert _get_object_info(bucket, '1') is None
         assert _get_object_info(bucket, '2') is None
         assert _get_object_info(bucket, '3') is not None
 
     def test_too_few_args(self):
+        from s3concat import s3concat
         with pytest.raises(ValueError):
             s3concat('s3://boo/baa')
 
     def test_no_objects_exist(self):
+        from s3concat import s3concat
         with pytest.raises(ValueError):
             s3concat('s3://boo/baa', 's3://baa/sfeji')
