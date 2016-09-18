@@ -26,19 +26,20 @@ from __future__ import absolute_import
 import logging
 from collections import defaultdict
 
-import boto3
 import gevent
 import gevent.pool
 from botocore.exceptions import ClientError
 
-from .resources import S3URL
+from . import resources
+from .urls import S3URL
 
 
 logging.basicConfig(level='WARNING')
 log = logging.getLogger(__name__)
 
 
-s3 = boto3.client('s3')
+s3 = resources.s3
+
 KB = 1024
 MB = KB**2
 

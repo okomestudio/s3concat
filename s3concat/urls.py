@@ -24,11 +24,27 @@
 # SOFTWARE.
 from __future__ import absolute_import
 import logging
-
-import boto3
+from urlparse import urlparse
 
 
 log = logging.getLogger(__name__)
 
 
-s3 = boto3.client('s3')
+class URL(object):
+    pass
+
+
+class S3URL(URL):
+
+    def __init__(self, url):
+        parsed = urlparse(url)
+        if parsed.scheme != 's3':
+            raise ValueError("An S3 path must starts with 's3://'")
+        self.bucket = parsed.netloc
+        self.key = parsed.path[1:]
+
+    def __repr__(self):
+        return 's3://{}/{}'.format(self.bucket, self.key)
+
+    def __str__(self):
+        return self.__repr__()

@@ -2,9 +2,9 @@ import hashlib
 import random
 import string
 
-import boto3
 import pytest
 
+from s3concat import resources
 from s3concat import s3concat
 from s3concat import s3concat_content
 
@@ -26,14 +26,12 @@ def generate_file(size):
 
 
 def md5(content):
-    m = hashlib.md5()
-    m.update(content)
-    return m.hexdigest()
+    return hashlib.md5(content).hexdigest()
 
 
 @pytest.fixture(scope='session')
 def s3():
-    return boto3.client('s3')
+    return resources.s3
 
 
 @pytest.fixture
