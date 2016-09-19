@@ -25,6 +25,7 @@
 from __future__ import absolute_import
 import logging
 from collections import defaultdict
+from collections import namedtuple
 
 import gevent
 import gevent.pool
@@ -137,58 +138,52 @@ def s3concat_content(bucket, key, content):
             _concat_to_big_object(bucket, key, content)
 
 
-def s3concat(*args, **kwargs):
-    if len(args) < 2:
-        raise ValueError('Must specify at least two S3 objects')
+S3Obj = namedtuple('S3Obj', ['s3url', 'info'])
 
-    remove_orig = kwargs.get('remove_orig', False)
 
-    primary = S3URL(args[0])
+def s3concat(urls, remove_orig=False):
+    urls = iter(urls)
 
-    objs = [None] * len(args)
+    def get_info(url):
+        s3url = S3URL(url)
+        return S3Obj(s3url, _get_object_info(s3url.bucket, s3url.key))
 
-    def get_info(idx, url):
-        obj = S3URL(url)
-        resp = _get_object_info(obj.bucket, obj.key)
-        if resp is None:
-            if idx != 0:
-                log.warning('Skipping non-existing S3 object %s', obj)
-            return
-        objs[idx] = (obj, resp)
-
-    pool = gevent.pool.Pool()
-    for idx, url in enumerate(args):
-        pool.spawn(get_info, idx, url)
+    pool = gevent.pool.Group()
+    s3objs = [o for o in pool.imap(get_info, urls)]
     pool.join()
 
-    objs = [o for o in objs if o is not None]
-    if not objs:
+    if len(s3objs) < 2:
+        raise ValueError('Must specify at least two S3 objects')
+
+    primary = s3objs[0].s3url
+    s3objs = [o for o in s3objs if o.info is not None]
+    if not s3objs:
         raise ValueError('None of input S3 objects exist')
 
     parts = []
     current_part = []
     current_part_size = 0
-    for obj, info in objs:
-        size = info['ContentLength']
+    for s3obj in s3objs:
+        size = s3obj.info['ContentLength']
 
         if current_part_size + size < 5 * MB:
-            current_part.append((obj, None))
+            current_part.append((s3obj.s3url, None))
             current_part_size += size
         else:
             if current_part_size == 0:
-                parts.append([(obj, (0, size - 1))])
+                parts.append([(s3obj.s3url, (0, size - 1))])
 
             else:
                 diff_size = 5 * MB - current_part_size
-                current_part.append((obj, (0, diff_size - 1)))
+                current_part.append((s3obj.s3url, (0, diff_size - 1)))
 
                 parts.append(current_part)
 
                 if size - diff_size < 5 * MB:
-                    current_part = [(obj, (diff_size, size - 1))]
+                    current_part = [(s3obj.s3url, (diff_size, size - 1))]
                     current_part_size = size - diff_size
                 else:
-                    parts.append([(obj, (diff_size, size - 1))])
+                    parts.append([(s3obj.s3url, (diff_size, size - 1))])
 
                     current_part = []
                     current_part_size = 0
@@ -218,9 +213,11 @@ def s3concat(*args, **kwargs):
 
     if remove_orig:
         buckets = defaultdict(set)
-        for obj, _ in objs:
-            if not (obj.bucket == primary.bucket and obj.key == primary.key):
-                buckets[obj.bucket].add(obj.key)
+        for s3obj in s3objs:
+            s3url = s3obj.s3url
+            if not (s3url.bucket == primary.bucket and
+                    s3url.key == primary.key):
+                buckets[s3url.bucket].add(s3url.key)
         for bucket, keys in buckets.iteritems():
             keys = list(keys)
             for idx in xrange(0, len(keys), 1000):

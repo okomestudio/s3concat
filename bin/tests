@@ -39,10 +39,20 @@ else
   opts+=("$@")
 fi
 
-for package in pytest pytest-cov pytest-capturelog mock moto ; do
+for package in pytest pytest-cov ; do
   if ! python -c "import $package" 2> /dev/null; then
     pip install -U "$package"
   fi
 done
+
+
+if ! python -c "import moto" 2> /dev/null; then
+  git clone git@github.com:okomestudio/moto.git
+  cd moto
+  git checkout ts/bugfix-multiupload
+  pip install .
+  cd ..
+fi
+
 
 pytest "${opts[@]}"

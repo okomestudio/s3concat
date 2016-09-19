@@ -167,7 +167,7 @@ class TestS3Concat(object):
 
         h = md5(content)
 
-        self.s3concat(*urls)
+        self.s3concat(urls)
 
         bucket_number, size = concat_args[0]
 
@@ -185,19 +185,21 @@ class TestS3Concat(object):
                 's3://{bucket}/1'.format(bucket=bucket),
                 's3://{bucket}/2'.format(bucket=bucket)]
 
-        self.s3concat(*urls, remove_orig=True)
+        self.s3concat(urls, remove_orig=True)
 
         assert self.get_object_info(bucket, '1') is None
         assert self.get_object_info(bucket, '2') is None
         assert self.get_object_info(bucket, '3') is not None
 
     def test_too_few_args(self):
-        with pytest.raises(ValueError):
-            self.s3concat('s3://boo/baa')
+        with pytest.raises(ValueError) as exc:
+            self.s3concat(['s3://boo/baa'])
+        assert 'Must specify at least two' in exc.value.message
 
     def test_no_objects_exist(self):
-        with pytest.raises(ValueError):
-            self.s3concat('s3://boo/baa', 's3://baa/sfeji')
+        with pytest.raises(ValueError) as exc:
+            self.s3concat(['s3://boo/baa', 's3://baa/sfeji'])
+        assert 'None of input' in exc.value.message
 
     def test_abort_multipart_upload(self):
         from s3concat.s3concat import _MultipartUpload
