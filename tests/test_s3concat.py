@@ -6,7 +6,6 @@ import string
 from collections import defaultdict
 
 import pytest
-from moto import mock_s3
 
 
 log = logging.getLogger(__name__)
@@ -37,13 +36,12 @@ def test_generate_file(size):
     assert size == len(generate_file(size))
 
 
-@pytest.fixture(scope='session')
-def s3():
-    m = mock_s3()
-    m.start()
-    from s3concat import resources
-    yield resources.s3
-    m.stop()
+class TestS3URL(object):
+
+    def test_invalid_s3_url(self):
+        from s3concat.urls import S3URL
+        with pytest.raises(ValueError):
+            S3URL('http://boo')
 
 
 @pytest.fixture(scope='class')
@@ -66,8 +64,23 @@ def buckets(request, s3):
         s3.delete_bucket(Bucket=bucket)
 
 
-@pytest.mark.skip
-@pytest.mark.usefixtures('env')
+@pytest.fixture
+def setup_s3concat_content(request, s3, buckets):
+    request.instance.s3 = s3
+    request.instance.buckets = buckets
+
+    yield
+
+    for bucket in buckets:
+        resp = s3.list_objects_v2(Bucket=bucket)
+        if 'Contents' in resp:
+            s3.delete_objects(
+                Bucket=bucket,
+                Delete={'Objects': [
+                    {'Key': rec['Key']} for rec in resp['Contents']]})
+
+
+@pytest.mark.usefixtures('setup_s3concat_content')
 class TestS3ConcatContent(object):
 
     @pytest.mark.parametrize('size_source, size_diff', [
@@ -75,16 +88,16 @@ class TestS3ConcatContent(object):
         (KB, 5 * MB + KB),
         (5 * MB + KB, KB),
         (5 * MB + KB, 5 * MB + KB)])
-    def test_s3concat_content(self, s3, buckets, size_source, size_diff):
+    def test_s3concat_content(self, size_source, size_diff):
         from s3concat import s3concat_content
-        bucket = buckets[0]
+        bucket = self.buckets[0]
         key = 'newobj'
         content = generate_file(size_source)
         h = md5(content)
 
         # concat to a non-existing key creates a new object
         s3concat_content(bucket, key, content)
-        resp = s3.get_object(Bucket=bucket, Key=key)
+        resp = self.s3.get_object(Bucket=bucket, Key=key)
         downloaded = resp['Body'].read()
         assert h == md5(downloaded)
 
@@ -92,13 +105,13 @@ class TestS3ConcatContent(object):
         diff = generate_file(size_diff)
         h = md5(content + diff)
         s3concat_content(bucket, key, diff)
-        resp = s3.get_object(Bucket=bucket, Key=key)
+        resp = self.s3.get_object(Bucket=bucket, Key=key)
         downloaded = resp['Body'].read()
         assert h == md5(downloaded)
 
 
 @pytest.fixture(scope='class')
-def s3concat_env(request, s3, buckets):
+def setup_s3concat(request, s3, buckets):
     objs = defaultdict(dict)
 
     bucket = buckets[0]
@@ -119,17 +132,22 @@ def s3concat_env(request, s3, buckets):
     request.cls.buckets = buckets
     request.cls.env = {'objects': objs}
 
+    from s3concat import s3concat
+    from s3concat.s3concat import _get_object_info
+    request.cls.s3concat = lambda self, *args, **kwargs: s3concat(
+        *args, **kwargs)
+    request.cls.get_object_info = lambda self, *args: _get_object_info(*args)
+
     yield
 
 
-@pytest.mark.usefixtures('s3concat_env')
+@pytest.mark.usefixtures('setup_s3concat')
 class TestS3Concat(object):
 
     @classmethod
     def to_url(cls, bucket_number, size):
         return 's3://' + cls.buckets[bucket_number] + '/' + str(size)
 
-    @pytest.mark.skip
     @pytest.mark.parametrize('concat_args', [
         ((0, 8*MB+1*KB), (0, 3*MB), (0, 5*MB), (1, 1*KB)),
         ((1, 11*KB), (1, 1*KB), (1, 10*KB)),
@@ -149,8 +167,7 @@ class TestS3Concat(object):
 
         h = md5(content)
 
-        from s3concat import s3concat
-        s3concat(*urls)
+        self.s3concat(*urls)
 
         bucket_number, size = concat_args[0]
 
@@ -168,20 +185,23 @@ class TestS3Concat(object):
                 's3://{bucket}/1'.format(bucket=bucket),
                 's3://{bucket}/2'.format(bucket=bucket)]
 
-        from s3concat import s3concat
-        s3concat(*urls, remove_orig=True)
+        self.s3concat(*urls, remove_orig=True)
 
-        from s3concat.s3concat import _get_object_info
-        assert _get_object_info(bucket, '1') is None
-        assert _get_object_info(bucket, '2') is None
-        assert _get_object_info(bucket, '3') is not None
+        assert self.get_object_info(bucket, '1') is None
+        assert self.get_object_info(bucket, '2') is None
+        assert self.get_object_info(bucket, '3') is not None
 
     def test_too_few_args(self):
-        from s3concat import s3concat
         with pytest.raises(ValueError):
-            s3concat('s3://boo/baa')
+            self.s3concat('s3://boo/baa')
 
     def test_no_objects_exist(self):
-        from s3concat import s3concat
         with pytest.raises(ValueError):
-            s3concat('s3://boo/baa', 's3://baa/sfeji')
+            self.s3concat('s3://boo/baa', 's3://baa/sfeji')
+
+    def test_abort_multipart_upload(self):
+        from s3concat.s3concat import _MultipartUpload
+        with pytest.raises(Exception) as exc:
+            with _MultipartUpload(self.buckets[0], 'baa'):
+                raise Exception('Bomb')
+        assert 'Bomb' in exc.value.message

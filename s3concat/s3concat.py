@@ -174,26 +174,24 @@ def s3concat(*args, **kwargs):
         if current_part_size + size < 5 * MB:
             current_part.append((obj, None))
             current_part_size += size
-            continue
-
-        if current_part_size == 0:
-            parts.append([(obj, (0, size - 1))])
-
         else:
-            diff_size = 5 * MB - current_part_size
-            current_part.append((obj, (0, diff_size - 1)))
+            if current_part_size == 0:
+                parts.append([(obj, (0, size - 1))])
 
-            parts.append(current_part)
+            else:
+                diff_size = 5 * MB - current_part_size
+                current_part.append((obj, (0, diff_size - 1)))
 
-            if size - diff_size < 5 * MB:
-                current_part = [(obj, (diff_size, size - 1))]
-                current_part_size = size - diff_size
-                continue
+                parts.append(current_part)
 
-            parts.append([(obj, (diff_size, size - 1))])
+                if size - diff_size < 5 * MB:
+                    current_part = [(obj, (diff_size, size - 1))]
+                    current_part_size = size - diff_size
+                else:
+                    parts.append([(obj, (diff_size, size - 1))])
 
-            current_part = []
-            current_part_size = 0
+                    current_part = []
+                    current_part_size = 0
 
     if current_part:
         parts.append(current_part)
