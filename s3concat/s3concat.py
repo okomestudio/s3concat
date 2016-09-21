@@ -91,7 +91,7 @@ class _MultipartUpload(object):
             PartNumber=len(self.upload_parts) + 1,
             UploadId=self.upload_id,
             **kwargs)
-        self.upload_parts.append(resp['ETag'][1:-1])
+        self.upload_parts.append(resp['ETag'])
 
     def add_part_copy(self, **kwargs):
         resp = s3.upload_part_copy(
@@ -100,7 +100,7 @@ class _MultipartUpload(object):
             PartNumber=len(self.upload_parts) + 1,
             UploadId=self.upload_id,
             **kwargs)
-        self.upload_parts.append(resp['CopyPartResult']['ETag'][1:-1])
+        self.upload_parts.append(resp['CopyPartResult']['ETag'])
 
 
 def _upload_object(bucket, key, content):
